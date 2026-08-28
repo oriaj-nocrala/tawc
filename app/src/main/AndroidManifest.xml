@@ -47,7 +47,8 @@
 
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:screenOrientation="landscape">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -69,7 +70,8 @@
             android:theme="@style/Theme.Tawc.Compositor"
             android:documentLaunchMode="intoExisting"
             android:taskAffinity=""
-            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboardHidden"
             android:windowSoftInputMode="stateHidden|adjustResize" />
 
         <service
@@ -159,7 +161,8 @@
             android:exported="false"
             android:documentLaunchMode="intoExisting"
             android:taskAffinity=""
-            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboardHidden"
             android:windowSoftInputMode="adjustResize" />
 
         <!-- Launch-failure dialog. Started from the application context
