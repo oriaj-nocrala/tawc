@@ -17,8 +17,11 @@ use crate::host::{ActivityId, OutputHost};
 
 pub fn desktop_window_map_location(window: &Window) -> Point<i32, Logical> {
     // Smithay `Space` locations identify a window's xdg window-geometry
-    // origin. tawc's Android host model keeps the wl_surface origin at the
-    // output origin, so map each window at its current geometry offset.
+    // origin. tawc's Android host model keeps the *primary* toplevel's
+    // wl_surface origin at the output origin, so map it at its current
+    // geometry offset. Secondary toplevels (dialogs sharing a parent's
+    // host) go through `DesktopRegistry::window_map_location` instead,
+    // which centers them over the parent.
     window.geometry().loc
 }
 
@@ -256,19 +259,48 @@ impl DesktopRegistry {
     }
 
     fn map_window_to_host(&mut self, window: &Window, host_id: &ActivityId) {
+        let location = self.window_map_location(host_id, window);
         let space = self.host_spaces.entry(host_id.clone()).or_default();
-        space.map_element(window.clone(), desktop_window_map_location(window), false);
+        space.map_element(window.clone(), location, false);
         space.refresh();
     }
 
     fn sync_window_anchor_if_mapped(&mut self, surface: &WlSurface, window: &Window) {
-        let Some(host_id) = self.surface_to_host.get(surface) else {
+        let Some(host_id) = self.surface_to_host.get(surface).cloned() else {
             return;
         };
-        if let Some(space) = self.host_spaces.get_mut(host_id) {
-            space.relocate_element(window, desktop_window_map_location(window));
+        let location = self.window_map_location(&host_id, window);
+        if let Some(space) = self.host_spaces.get_mut(&host_id) {
+            space.relocate_element(window, location);
             space.refresh();
         }
+    }
+
+    /// Where to map `window` within `host_id`'s `Space`. A secondary
+    /// toplevel sharing its parent's host (see
+    /// `TawcState::configure_toplevel_for_host`'s parent branch) is
+    /// centered over the parent's current on-screen geometry, like a
+    /// real desktop WM would place a transient dialog. Everything else
+    /// (the primary toplevel for a host, or a dialog whose parent isn't
+    /// mapped yet) falls back to [`desktop_window_map_location`].
+    fn window_map_location(&self, host_id: &ActivityId, window: &Window) -> Point<i32, Logical> {
+        self.centered_over_parent(host_id, window)
+            .unwrap_or_else(|| desktop_window_map_location(window))
+    }
+
+    fn centered_over_parent(
+        &self,
+        host_id: &ActivityId,
+        window: &Window,
+    ) -> Option<Point<i32, Logical>> {
+        let parent_surface = window.toplevel()?.parent()?;
+        let parent_window = self.windows.get(&parent_surface)?;
+        let space = self.host_spaces.get(host_id)?;
+        let parent_geo = space.element_geometry(parent_window)?;
+        let size = window.geometry().size;
+        let x = parent_geo.loc.x + (parent_geo.size.w - size.w) / 2;
+        let y = parent_geo.loc.y + (parent_geo.size.h - size.h) / 2;
+        Some(Point::from((x.max(0), y.max(0))))
     }
 
     fn window_containing_surface(&self, committed: &WlSurface) -> Option<(WlSurface, Window)> {

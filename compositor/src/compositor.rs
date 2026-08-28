@@ -508,7 +508,32 @@ impl TawcState {
         toplevel: &ToplevelSurface,
         host_id: &ActivityId,
     ) -> Option<(i32, i32)> {
+        use wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgState;
+
         let (w, h) = self.host_logical_size(host_id)?;
+
+        if toplevel.parent().is_some() {
+            // Secondary toplevel sharing its parent's host (e.g. a "Save
+            // As" dialog implemented as its own xdg_toplevel rather than
+            // an xdg_popup): don't force it to the host's full
+            // size/Maximized state like the primary window -- clear the
+            // size hint and drop Maximized/Fullscreen so the client
+            // sizes itself like a real transient dialog instead of
+            // stretching to fill the Activity. `DesktopRegistry`'s
+            // window-map-location logic centers it over its parent.
+            toplevel.with_pending_state(|state| {
+                state.size = None;
+                // Still cap against the host so a client that ignores
+                // the missing size hint can't pick buffers wider than
+                // the logical screen and render mostly off-screen (same
+                // GTK4 guard as the primary path below).
+                state.bounds = Some((w, h).into());
+                state.states.unset(XdgState::Maximized);
+                state.states.unset(XdgState::Fullscreen);
+            });
+            return Some((w, h));
+        }
+
         let fullscreen = self.host_fullscreen(host_id);
         toplevel.with_pending_state(|state| {
             state.size = Some((w, h).into());
@@ -1035,6 +1060,40 @@ impl XdgShellHandler for TawcState {
         } else {
             set_toplevel_fullscreen_state(&surface, false, None);
             surface.send_pending_configure();
+        }
+    }
+
+    /// Fires when a client calls `xdg_toplevel.set_parent` -- notably
+    /// *after* the toplevel already exists, which many toolkits do (create
+    /// the surface, then associate a parent once it's known, e.g. a "Save
+    /// As" dialog wired up after its owning window is already mapped).
+    /// `new_toplevel`'s host assignment already ran with `parent() ==
+    /// None` at that point, so the dialog got its own dedicated Activity
+    /// instead of sharing its parent's host -- move it now that the real
+    /// parent is known, and clean up the now-orphaned Activity it briefly
+    /// had, the same way a closed window would be.
+    fn parent_changed(&mut self, surface: ToplevelSurface) {
+        let Some(parent_surface) = surface.parent() else {
+            return;
+        };
+        let Some(new_host) = self.desktop.assigned_host(&parent_surface).cloned() else {
+            return;
+        };
+        let old_host = self.desktop.assigned_host(surface.wl_surface()).cloned();
+        if old_host.as_ref() == Some(&new_host) {
+            return;
+        }
+
+        self.desktop
+            .assign_surface_to_host(surface.wl_surface().clone(), new_host.clone());
+        self.sync_desktop_hosts();
+
+        if self.configure_toplevel_for_host(&surface, &new_host).is_some() {
+            surface.send_pending_configure();
+        }
+
+        if let Some(old_host) = old_host {
+            self.finish_host_if_unused(&old_host);
         }
     }
 
