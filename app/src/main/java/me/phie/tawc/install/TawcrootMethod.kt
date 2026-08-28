@@ -68,18 +68,27 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      * [ProotMethod.runOutside] — the tawcroot rootfs is app-uid-owned
      * just like proot's, and host-side cleanup never needs to enter
      * the rootfs view.
+     *
+     * `TMPDIR` is pinned to the app's cache dir: `/system/bin/sh` is
+     * mksh, which spills heredocs (used throughout
+     * [me.phie.tawc.install.distro.arch.ArchPacmanCommon.configure])
+     * to a temp file. Without an explicit `TMPDIR`, mksh's fallback
+     * varies by OEM/Android version — on some (observed: Android 11,
+     * Lenovo Tab P11) it resolves to `/data/local`, which the app uid
+     * cannot write, failing configure with "Permission denied".
+     * `cacheDir` is always app-uid-writable regardless of vendor.
      */
     override fun runOutside(
         script: String,
         onLine: ((String) -> Unit)?,
     ): MethodResult =
-        Sh.run("set -eu\n$script", onLine)
+        Sh.run("set -eu\n$script", onLine, env = mapOf("TMPDIR" to appContext.cacheDir.absolutePath))
 
     /**
      * Start a tawcroot subprocess running [command] inside [rootfs].
      * Argv shape:
      *
-     *   /system/bin/setsid <tawcroot> -r <rootfs> \
+     *   /system/bin/setsid -w <tawcroot> -r <rootfs> \
      *       -b /dev:/dev -b /proc:/proc -b /sys:/sys \
      *       -b /apex:/apex:ro [-b /vendor:/vendor:ro ...] \
      *       [-b <filesDir>/libhybris:/usr/lib/hybris:ro ...] \
@@ -100,6 +109,20 @@ class TawcrootMethod(context: Context) : InstallationMethod {
      * signal mask) and the integration test framework's PGID-based
      * cleanup; the underlying contract is general.
      *
+     * `-w` is required: Android's toybox `setsid` without it forks
+     * and returns immediately, exit 0, leaving the real tawcroot
+     * process to run detached as an orphan. The `Process` object
+     * [ProcessBuilder] hands back then tracks only that short-lived
+     * fork parent — `waitFor()` returns almost instantly and the
+     * stdout/stderr relay threads see EOF with zero bytes, because
+     * they're reading the parent's pipe ends, not the orphan's.
+     * Symptom seen on-device (Lenovo Tab P11, Android 11): every
+     * `--in-rootfs` spawn exited 0 with no output, indistinguishable
+     * from the (unrelated) silent-SIGSYS-death failure mode this file
+     * and tawcroot/src/syscalls_fd.c also guard against — `-w` makes
+     * setsid wait for the real child and relay its exit status, so
+     * the tracked `Process` is the one actually doing the work.
+     *
      * The in-rootfs bash starts under `/usr/bin/env -i KEY=VAL …` so
      * nothing the host JVM (or Android's launcher chain) inherited
      * leaks through — the bash sees exactly [RootfsEnv]'s map. `bash
@@ -113,6 +136,7 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         val tmpdir = prepareSpawn(rootfs, assetBinds, externalBinds)
         val argv = buildList {
             add("/system/bin/setsid")
+            add("-w")
             addAll(rootfsArgv(rootfs, graphics, assetBinds, externalBinds, andoHostDir))
             add("/bin/bash")
             if (command != null) {

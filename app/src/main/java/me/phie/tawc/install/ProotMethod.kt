@@ -178,7 +178,11 @@ class ProotMethod(context: Context) : InstallationMethod {
         //
         // setsid upholds the rootfs-session invariant (see
         // notes/rootfs-sessions.md): every chroot invocation runs in
-        // its own session.
+        // its own session. `-w` is required — Android's toybox
+        // `setsid` without it forks and returns immediately, so the
+        // exec'd `sh` [ProcessBuilder] tracks would exit before proot
+        // has even started, losing its stdio. See
+        // [TawcrootMethod.startInside]'s doc for the failure mode.
         //
         // The user command is passed as positional arg `$1` to dodge
         // shell-layer quoting — sh -c "<script>" $0 $1 makes $1 = the
@@ -187,9 +191,9 @@ class ProotMethod(context: Context) : InstallationMethod {
             prootArgv(rootfs, andoHostDir) + RootfsEnv.envArgv(RootfsEnv.Method.PROOT, graphics ?: Settings.graphicsBackend)
         val invokeShell = invokeArgv.joinToString(" ") { Sh.quote(it) }
         val script = if (command != null) {
-            "exec /system/bin/setsid $invokeShell /bin/bash -lc \"\$1\""
+            "exec /system/bin/setsid -w $invokeShell /bin/bash -lc \"\$1\""
         } else {
-            "exec /system/bin/setsid $invokeShell /bin/bash -l"
+            "exec /system/bin/setsid -w $invokeShell /bin/bash -l"
         }
         val argv = listOf(
             "/system/bin/sh", "-c", script,

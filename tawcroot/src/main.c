@@ -470,6 +470,20 @@ __attribute__((noreturn)) static void prod_main(int argc, char **argv)
 	 * dispatch path. (init_self_host_path runs inside supervisor_init.) */
 	tawcroot_set_guest_exe_path(argv[cmd_start]);
 
+#ifdef TAWCROOT_TRACE
+	tawc_io_str("tawcroot: prod_main argc="); tawc_io_dec(argc);
+	tawc_io_str(" cmd_start="); tawc_io_dec(cmd_start);
+	tawc_io_str(" argv[cmd_start]=");
+	tawc_io_str(argv[cmd_start] ? argv[cmd_start] : "(null)");
+	tawc_io_str(" trailing_argc="); tawc_io_dec(argc - cmd_start);
+	tawc_io_str("\n");
+	for (int k = cmd_start; k < argc; k++) {
+		tawc_io_str("tawcroot:   argv["); tawc_io_dec(k);
+		tawc_io_str("]="); tawc_io_str(argv[k] ? argv[k] : "(null)");
+		tawc_io_str("\n");
+	}
+#endif
+
 	/* Hand off. The loader internally calls tawcroot_path_translate
 	 * for guest_path and PT_INTERP because tawcroot_rootfs_fd is now
 	 * set; argv[0] from the guest's perspective stays the path it

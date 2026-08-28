@@ -30,7 +30,14 @@
 
 #define TAWC_LDR_PATH_MAX 4096
 
-#define LOADER_FAIL(code) tawc_exit_group(code)
+#define LOADER_FAIL(code) do {                          \
+        tawc_io_str("tawcroot: LOADER_FAIL code=");     \
+        tawc_io_dec((code));                            \
+        tawc_io_str(" at " __FILE__ ":");               \
+        tawc_io_dec(__LINE__);                          \
+        tawc_io_str("\n");                              \
+        tawc_exit_group(code);                          \
+} while (0)
 
 /* Captured-at-startup auxv values. Populated by tawcroot_main_capture_auxv
  * (called from tawcroot_main right after argv lands) and re-populated by
@@ -440,6 +447,13 @@ void tawcroot_loader_exec(const struct tawc_loader_exec_args *args)
 	 * region, which is where eff_argv/guest_path point on the
 	 * top-level prod entry. */
 	tawcroot_proctitle_apply(args->guest_path, eff_argc, eff_argv);
+#ifdef TAWCROOT_TRACE
+	tawc_io_str("tawcroot: about to jump, entry=");
+	tawc_io_hex(entry);
+	tawc_io_str(" argv0=");
+	tawc_io_str(eff_argc > 0 && eff_argv[0] ? eff_argv[0] : "(null)");
+	tawc_io_str("\n");
+#endif
 	tawc_loader_jump(so.sp, entry);
 }
 
@@ -454,6 +468,10 @@ void tawcroot_loader_exec(const struct tawc_loader_exec_args *args)
  * unmap it before the jump). */
 void tawcroot_loader_exec_child(int state_fd, const char *platform)
 {
+#ifdef TAWCROOT_TRACE
+	tawc_io_str("tawcroot: exec-child enter\n");
+#endif
+
 	/* lseek SEEK_END is the cheapest "get file size" without dragging
 	 * in the whole struct kernel_stat machinery. memfds are seekable. */
 	long size = tawc_lseek(state_fd, 0, 2 /* SEEK_END */);
@@ -513,6 +531,11 @@ void tawcroot_loader_exec_child(int state_fd, const char *platform)
 	 * root in the exec'd image. */
 	if (st.has_identity) tawcroot_identity_load(&st.identity);
 
+#ifdef TAWCROOT_TRACE
+	tawc_io_str("tawcroot: exec-child about to close state_fd=");
+	tawc_io_dec(state_fd);
+	tawc_io_str("\n");
+#endif
 	/* Don't bother closing — we're about to hand control to the guest
 	 * and any leftover fd dies on the next execve. */
 	(void)tawc_close(state_fd);

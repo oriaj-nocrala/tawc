@@ -12,6 +12,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <signal.h>
 
 #include "dispatch.h"
 #include "fdtab.h"
@@ -25,6 +26,51 @@
 #include "tawc_uapi.h"
 #include "usercopy.h"
 #include "stack_budget.h"
+
+/* Debug-only: catch a fatal signal landing inside our own
+ * exec_handler/loader bootstrap (a real crash, not a deliberate
+ * tawc_exit_group) so it leaves a trace instead of vanishing. Matches
+ * kernel `struct sigaction` layout — see handler.c's identical
+ * kernel_sigaction for why we don't use <signal.h>'s alias. Kept in
+ * its own struct here (not shared via a header) since this is a
+ * temporary diagnostic, not production shape. */
+#ifdef TAWCROOT_TRACE
+struct tawcroot_dbg_sigaction {
+	void (*k_sa_handler)(int, siginfo_t *, void *);
+	unsigned long sa_flags;
+	void (*sa_restorer)(void);
+	uint64_t sa_mask;
+};
+
+extern void tawcroot_sigreturn_trampoline(void);
+
+#ifndef SA_RESTORER
+# define SA_RESTORER 0x04000000
+#endif
+
+static void tawcroot_dbg_fatal_sig(int s, siginfo_t *i, void *u)
+{
+	(void)u;
+	tawc_io_str("tawcroot: FATAL sig=");   tawc_io_dec(s);
+	tawc_io_str(" code=");                 tawc_io_dec(i->si_code);
+	tawc_io_str(" addr=");
+	tawc_io_hex((unsigned long)(uintptr_t)i->si_addr);
+	tawc_io_str("\n");
+	tawc_exit_group(200 + s);
+}
+
+static void tawcroot_dbg_install_fatal_handlers(void)
+{
+	struct tawcroot_dbg_sigaction fa;
+	fa.k_sa_handler = tawcroot_dbg_fatal_sig;
+	fa.sa_flags     = SA_SIGINFO | SA_RESTORER | SA_NODEFER;
+	fa.sa_restorer  = tawcroot_sigreturn_trampoline;
+	fa.sa_mask      = 0;
+	int fs[] = { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT };
+	for (unsigned k = 0; k < sizeof fs / sizeof fs[0]; k++)
+		(void)TAWC_RAW(TAWC_SYS_rt_sigaction, fs[k], (long)&fa, 0, 8, 0, 0);
+}
+#endif
 
 /* Init-only: runs on tawcroot's own full-size stack, never on a
  * guest thread's stack. */
@@ -43,7 +89,14 @@ void tawcroot_supervisor_init(const struct tawcroot_supervisor_args *args)
 		tawc_exit_group(90);
 	}
 	long resv = tawcroot_fd_reserve((int)rfd);
-	if (resv < 0) tawc_exit_group(91);
+	if (resv < 0) {
+		tawc_io_str("tawcroot: fd_reserve(rootfs) failed rv=");
+		tawc_io_dec(resv);
+		tawc_io_str(" n_reserved=");
+		tawc_io_dec((long)tawcroot_n_reserved_fds);
+		tawc_io_str("\n");
+		tawc_exit_group(91);
+	}
 	tawcroot_rootfs_fd = (int)resv;
 
 	/* (2) Stash the canonical host path for getcwd reverse-translation
@@ -105,6 +158,9 @@ void tawcroot_supervisor_init(const struct tawcroot_supervisor_args *args)
 			tawc_io_str(args->bind_src[i]);
 			tawc_io_str(" -> ");
 			tawc_io_str(args->bind_dst[i]);
+			tawc_io_str(" rv="); tawc_io_dec(br);
+			tawc_io_str(" n_reserved=");
+			tawc_io_dec((long)tawcroot_n_reserved_fds);
 			tawc_io_str("\n");
 			tawc_exit_group(93);
 		}
@@ -122,7 +178,10 @@ void tawcroot_supervisor_init(const struct tawcroot_supervisor_args *args)
 			if (!args->shm_names[i]) continue;
 			long sr = tawcroot_shm_register(args->shm_names[i],
 			                                args->shm_fds[i]);
-			if (sr < 0) tawc_exit_group(95);
+			if (sr < 0) {
+				tawc_io_str("tawcroot: shm_register failed\n");
+				tawc_exit_group(95);
+			}
 		}
 	}
 
@@ -140,6 +199,10 @@ void tawcroot_supervisor_init(const struct tawcroot_supervisor_args *args)
 	 * code that may itself trap under Android's stacked filter. */
 	long inst = tawcroot_install_handler();
 	if (inst != 0) tawc_exit_group(94);
+
+#ifdef TAWCROOT_TRACE
+	tawcroot_dbg_install_fatal_handlers();
+#endif
 
 	/* (8) Reset the inherited signal mask before any further trap-
 	 * driven syscalls. Several launchers inherit a non-empty mask:

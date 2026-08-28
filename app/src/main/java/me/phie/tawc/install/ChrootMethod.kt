@@ -46,7 +46,12 @@ class ChrootMethod(context: Context) : InstallationMethod {
      *
      * `setsid` upholds the rootfs-session invariant
      * (notes/rootfs-sessions.md): every chroot invocation runs in its
-     * own session.
+     * own session. `-w` is required — Android's toybox `setsid`
+     * without it forks and returns immediately, so the `exec`'d
+     * process `su`'s pipe is attached to (the one [ProcessBuilder]
+     * tracks) exits before the real chroot'd command has even
+     * started, losing its stdio. See [TawcrootMethod.startInside]'s
+     * doc for the failure mode this produces.
      */
     override fun startInside(rootfs: String, command: String?, graphics: GraphicsBackend?): Process {
         LinkerConfig.install(rootfs)
@@ -73,9 +78,9 @@ class ChrootMethod(context: Context) : InstallationMethod {
                 .joinToString(" ") { Sh.quote(it) }
             if (command != null) {
                 val cmdQ = Sh.quote(command)
-                appendLine("exec setsid chroot $rootfsQ $envArgvQ /bin/bash -lc $cmdQ")
+                appendLine("exec setsid -w chroot $rootfsQ $envArgvQ /bin/bash -lc $cmdQ")
             } else {
-                appendLine("exec setsid chroot $rootfsQ $envArgvQ /bin/bash -l")
+                appendLine("exec setsid -w chroot $rootfsQ $envArgvQ /bin/bash -l")
             }
         }
         // Write+flush; intentionally don't close (exec replaces the

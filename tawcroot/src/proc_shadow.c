@@ -331,6 +331,48 @@ static int is_proc_bus_pci_devices(const char *path)
 	return tawc_streq(path, "/proc/bus/pci/devices");
 }
 
+/* /proc/sys/net/ipv6/conf/<iface>/disable_ipv6: glibc's resolver
+ * (`check_pf` in sysdeps/unix/sysv/linux/check_pf.c) reads this per
+ * interface as part of deciding whether to probe AAAA records — every
+ * getaddrinfo() call touches it, for every interface the kernel
+ * reports (not just all/default/lo — the active radio interface too,
+ * e.g. "wlan0"). Observed denied by SELinux for untrusted_app on some
+ * Android/kernel combos (Android 11, Lenovo Tab P11 — permissive=0 avc
+ * denial on proc_net:file), while allowed on others (Android 15
+ * physical devices tested). Same failure shape as /proc/stat above:
+ * the guest doesn't get -EACCES, it gets whatever undefined behaviour
+ * follows from a resolver init step failing partway through the
+ * per-interface scan — observed as gpgme/dirmngr's network engine
+ * check silently never completing ("GPGME error: Invalid crypto
+ * engine" / "missing required signature" on every package, since
+ * libalpm's signature check routes through the same gpg-agent/dirmngr
+ * IPC). IPv6 is never actually disabled by anything in the rootfs, so
+ * "0" (not disabled) is always the correct synthesized answer for any
+ * interface name — hence a prefix/suffix match instead of an
+ * enumerated interface list, which would drift out of date the moment
+ * a device's radio interface has a name we didn't special-case. */
+static const char *match_proc_sys_disable_ipv6(const char *path)
+{
+	static const char prefix[] = "/proc/sys/net/ipv6/conf/";
+	static const char suffix[] = "/disable_ipv6";
+	const size_t prefixlen = sizeof(prefix) - 1;
+	const size_t suffixlen = sizeof(suffix) - 1;
+
+	if (!tawc_starts_with(path, prefix)) return NULL;
+	size_t len = tawc_strlen(path);
+	if (len <= prefixlen + suffixlen) return NULL; /* empty iface name */
+
+	size_t iface_end = len - suffixlen;
+	for (size_t i = 0; i < suffixlen; i++)
+		if (path[iface_end + i] != suffix[i]) return NULL;
+	/* Reject extra path separators between prefix and suffix — an
+	 * interface name is one path component, never nested. */
+	for (size_t i = prefixlen; i < iface_end; i++)
+		if (path[i] == '/') return NULL;
+
+	return "tawcroot-disable-ipv6";
+}
+
 /* /proc/stat: Android's SELinux denies untrusted_app the read, so
  * procps `ps` dies with "Unable to get system boot time" (it needs the
  * `btime` line). Synthesize the minimum procps needs: btime derived
@@ -499,6 +541,11 @@ static long open_proc_overflow_id_shadow(const char *memfd_name)
 	return memfd_from_bytes(memfd_name, "65534\n", 6);
 }
 
+static long open_proc_disable_ipv6_shadow(const char *memfd_name)
+{
+	return memfd_from_bytes(memfd_name, "0\n", 2);
+}
+
 /* /proc/bus/pci/devices shadow fd. Returns an empty memfd — that's the
  * legitimate "no PCI devices visible" state that libpci's procfs back-
  * end is designed to handle. See the head-of-handle_openat comment for
@@ -548,6 +595,7 @@ static long open_proc_stat_shadow(void)
 int tawcroot_proc_shadow_open(const char *path, long *out)
 {
 	const char *overflow_name;
+	const char *disable_ipv6_name;
 	if (is_proc_self_maps(path)) {
 		*out = open_proc_maps_shadow();
 		return 1;
@@ -555,6 +603,11 @@ int tawcroot_proc_shadow_open(const char *path, long *out)
 	overflow_name = match_proc_sys_overflow_id(path);
 	if (overflow_name) {
 		*out = open_proc_overflow_id_shadow(overflow_name);
+		return 1;
+	}
+	disable_ipv6_name = match_proc_sys_disable_ipv6(path);
+	if (disable_ipv6_name) {
+		*out = open_proc_disable_ipv6_shadow(disable_ipv6_name);
 		return 1;
 	}
 	if (is_proc_bus_pci_devices(path)) {

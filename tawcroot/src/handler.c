@@ -97,6 +97,19 @@ static void sigsys_handler(int sig, siginfo_t *info, void *ucontext)
 	tawcroot_syscall_args args;
 	tawcroot_arch_read_args(uc, &args);
 
+#ifdef TAWCROOT_TRACE
+	{
+		char l[64]; size_t li = 0;
+		long p = TAWC_RAW(TAWC_SYS_getpid, 0, 0, 0, 0, 0, 0);
+		(void)tawc_str_append(l, sizeof l, &li, "[t>] pid=");
+		(void)tawc_str_append_dec(l, sizeof l, &li, p);
+		(void)tawc_str_append(l, sizeof l, &li, " nr=");
+		(void)tawc_str_append_dec(l, sizeof l, &li, args.nr);
+		(void)tawc_str_append(l, sizeof l, &li, "\n");
+		TAWC_RAW(TAWC_SYS_write, 2, (long)l, (long)li, 0, 0, 0);
+	}
+#endif
+
 #ifdef TAWCROOT_TESTHOST
 	/* siginfo_t fields populated by the kernel for SIGSYS:
 	 *   si_signo, si_errno, si_code (== SYS_SECCOMP for our case),

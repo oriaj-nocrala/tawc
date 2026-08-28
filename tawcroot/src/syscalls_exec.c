@@ -138,16 +138,59 @@ static long collect_array(char *const *guest_arr,
  * relaunch fork+execve then hung). commit() touches no shared statics,
  * so running it unlocked is safe. */
 static volatile int g_exec_lock;
+/* pid of the thread/process currently holding g_exec_lock, valid only
+ * while g_exec_lock is set. Lets a spinning acquirer distinguish "the
+ * holder is doing legitimate, brief work" from "the holder died with
+ * the lock held" (e.g. killed by a nested-SIGSYS silent death for some
+ * syscall between the lock and the matching unlock — the same failure
+ * shape close_range had before it got its own fix; this is the same
+ * hazard for whatever untranslated syscall trips it next). Without
+ * this, every later thread that needs the lock spins forever, which
+ * looks from the guest's side like the whole exec silently vanished. */
+static volatile long g_exec_lock_pid;
+
+/* Re-check the holder's liveness this often (spin iterations, not
+ * time) rather than on every spin — kill(pid, 0) is a syscall, and
+ * exec is supposed to be a fast path. */
+#define EXEC_LOCK_STALE_CHECK_EVERY 100000
 
 static void exec_lock(void)
 {
+	long self = TAWC_RAW(TAWC_SYS_getpid, 0, 0, 0, 0, 0, 0);
+	unsigned spins = 0;
 	while (__atomic_test_and_set(&g_exec_lock, __ATOMIC_ACQUIRE)) {
-		/* spin — exec is rare and terminal */
+		if (++spins >= EXEC_LOCK_STALE_CHECK_EVERY) {
+			spins = 0;
+			long holder = __atomic_load_n(&g_exec_lock_pid,
+						      __ATOMIC_ACQUIRE);
+			/* holder==0: unlock raced us between the failed
+			 * test_and_set and this read — just retry, no
+			 * kill(0,...) confusion (pid 0 means "this process
+			 * group" to kill(2), not "no pid"). */
+			if (holder > 0 && holder != self) {
+				long rv = TAWC_RAW(TAWC_SYS_kill, holder, 0,
+						   0, 0, 0, 0);
+				if (rv == TAWC_ESRCH) {
+					/* Holder is dead. Force the lock
+					 * open — CAS so a genuinely-still-
+					 * alive holder that unlocked normally
+					 * in the meantime isn't clobbered. */
+					int expected = 1;
+					__atomic_compare_exchange_n(
+						&g_exec_lock, &expected, 0,
+						0, __ATOMIC_RELEASE,
+						__ATOMIC_RELAXED);
+				}
+			}
+		}
+		/* else: spin — exec is rare and terminal */
 	}
+	__atomic_store_n(&g_exec_lock_pid, self, __ATOMIC_RELEASE);
 }
 
 static void exec_unlock(void)
 {
+	__atomic_store_n(&g_exec_lock_pid, 0, __ATOMIC_RELAXED);
 	__atomic_clear(&g_exec_lock, __ATOMIC_RELEASE);
 }
 

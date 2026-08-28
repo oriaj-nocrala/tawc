@@ -15,6 +15,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <signal.h>
 
 #include <sys/stat.h>
 
@@ -123,6 +124,77 @@ static long handle_close(const tawcroot_syscall_args *args, ucontext_t *uc)
 	return 0;
 }
 
+#ifndef CLOSE_RANGE_CLOEXEC
+# define CLOSE_RANGE_CLOEXEC (1U << 2)
+#endif
+
+/* close_range(2) usability probe.
+ *
+ * NR 436 postdates Android's stacked untrusted_app seccomp policy on
+ * older OS builds (observed: Android 11 / kernel 4.14, Lenovo Tab
+ * P11). Our own filter lets it through via the raw-syscall IP
+ * allowlist, but Android's outer filter RET_TRAPs it — and inside
+ * this SIGSYS handler, SIGSYS is self-masked, so that nested trap
+ * can't be delivered normally. The kernel falls back to SIGSYS's
+ * default action (process death): no signal, no exit_group, nothing
+ * to catch. The guest (gpg-agent/dirmngr spawning under modern glibc,
+ * which calls close_range(3, ~0U, CLOSE_RANGE_CLOEXEC) before exec)
+ * simply vanishes — surfaced as GPGME "Invalid crypto engine" once
+ * enough of these silent deaths happen during a signature check.
+ *
+ * Can't be detected safely from this process, so we measure it in a
+ * disposable child: a full clone() (COW memory + its own fd table —
+ * nothing it does can touch us), SIGSYS reset to SIG_DFL so a trap
+ * kills *it* instead of re-entering our handler, then a harmless
+ * close_range call. The child's exit status says whether the syscall
+ * actually reached the kernel.
+ *
+ * clone(flags=0): no exit signal, so the guest never sees a spurious
+ * SIGCHLD nor accidentally reaps this child via its own wait(-1)
+ * (gpgme and pacman both do exactly that). We reap it ourselves with
+ * __WCLONE. */
+#define TAWC_WCLONE 0x80000000
+
+enum { CR_UNKNOWN = 0, CR_NATIVE = 1, CR_EMULATE = 2 };
+static volatile int g_close_range_mode;
+
+static void close_range_probe(void)
+{
+	/* Benign race: two threads probing at once both compute and store
+	 * the same answer. An extra fork is harmless. */
+	struct { void *h; unsigned long fl; void *r; uint64_t m; } dfl =
+		{ 0, 0, 0, 0 };
+	long pid = TAWC_RAW(TAWC_SYS_clone, 0 /* flags: no exit signal */,
+			    0 /* stack: stay on ours, COW */,
+			    0, 0, 0, 0);
+	if (pid == 0) {
+		/* Child. A trap here must kill us outright, not bounce
+		 * back into our own SIGSYS handler. */
+		(void)tawc_rt_sigaction(SIGSYS, (void *)&dfl, (void *)0, 8);
+		/* Harmless range: a very high fd nothing has open.
+		 * close_range ignores unopened fds and returns 0. */
+		long rv = TAWC_RAW(TAWC_SYS_close_range,
+				   0x00fffffe, 0x00ffffff, 0, 0, 0, 0);
+		tawc_exit_group(rv == 0 ? 0 : 1);
+	}
+	if (pid < 0) { g_close_range_mode = CR_EMULATE; return; }
+
+	int status = 0;
+	long w;
+	do {
+		w = TAWC_RAW(TAWC_SYS_wait4, pid, (long)&status,
+			     TAWC_WCLONE, 0, 0, 0);
+	} while (w == TAWC_EINTR);
+
+	/* Clean exit(0) -> the real syscall reached the kernel and
+	 * worked. Anything else (killed by signal — Android's filter
+	 * trapped it; exit(1) — clean -ENOSYS on kernels <5.9; wait4
+	 * itself failing) -> emulate. */
+	int ok = (w == pid) && ((status & 0x7f) == 0) &&
+		 (((status >> 8) & 0xff) == 0);
+	g_close_range_mode = ok ? CR_NATIVE : CR_EMULATE;
+}
+
 static long handle_close_range(const tawcroot_syscall_args *args,
 			       ucontext_t *uc)
 {
@@ -131,44 +203,61 @@ static long handle_close_range(const tawcroot_syscall_args *args,
 	unsigned int last  = (unsigned int)args->b;
 	unsigned int flags = (unsigned int)args->c;
 
-	/* Close everything the guest asked for except our reserved slots:
-	 * walk the range upwards, issuing one close_range per gap between
-	 * them. With the ~8 reserved fds we ship (clustered right above the
-	 * base) a full `close_range(3, ~0U)` costs two kernel calls.
-	 *
-	 * Trimming `last` to the base instead — the old shape — silently
-	 * left every guest fd at or above the base open, i.e. an fd leak
-	 * across exec for exactly the programs careful enough to closefrom.
-	 * Splitting also gets CLOSE_RANGE_CLOEXEC right: our non-CLOEXEC
-	 * shm fds must not be swept into CLOEXEC. */
-	if (first > last)
-		return TAWC_RAW(TAWC_SYS_close_range, first, last, flags,
-				0, 0, 0);  /* kernel's EINVAL, verbatim */
+	if (first > last) return TAWC_EINVAL;
 
-	unsigned int cur = first;
-	for (;;) {
-		/* Lowest reserved fd in [cur, last], if any. */
-		unsigned int next = 0;
-		int have = 0;
-		size_t n = __atomic_load_n(&tawcroot_n_reserved_fds,
-					   __ATOMIC_ACQUIRE);
-		for (size_t i = 0; i < n; i++) {
-			int r = __atomic_load_n(&tawcroot_reserved_fds[i],
-						__ATOMIC_RELAXED);
-			if (r < 0) continue;  /* tombstone */
-			unsigned int u = (unsigned int)r;
-			if (u < cur || u > last) continue;
-			if (!have || u < next) { next = u; have = 1; }
+	int mode = g_close_range_mode;
+	if (mode == CR_UNKNOWN) { close_range_probe(); mode = g_close_range_mode; }
+
+	if (mode == CR_NATIVE) {
+		/* Original fast path: one real close_range per gap between
+		 * reserved fds. With the ~8 we ship (clustered right above
+		 * the base) a full close_range(3, ~0U) costs two syscalls. */
+		unsigned int cur = first;
+		for (;;) {
+			unsigned int next = 0;
+			int have = 0;
+			size_t n = __atomic_load_n(&tawcroot_n_reserved_fds,
+						   __ATOMIC_ACQUIRE);
+			for (size_t i = 0; i < n; i++) {
+				int r = __atomic_load_n(&tawcroot_reserved_fds[i],
+							__ATOMIC_RELAXED);
+				if (r < 0) continue;
+				unsigned int u = (unsigned int)r;
+				if (u < cur || u > last) continue;
+				if (!have || u < next) { next = u; have = 1; }
+			}
+			if (!have || next > cur) {
+				long rv = TAWC_RAW(TAWC_SYS_close_range, cur,
+						   have ? next - 1 : last,
+						   flags, 0, 0, 0);
+				if (rv < 0) return rv;
+			}
+			if (!have || next == last) return 0;
+			cur = next + 1;
 		}
-		if (!have || next > cur) {
-			long rv = TAWC_RAW(TAWC_SYS_close_range, cur,
-					   have ? next - 1 : last, flags,
-					   0, 0, 0);
-			if (rv < 0) return rv;
-		}
-		if (!have || next == last) return 0;
-		cur = next + 1;
 	}
+
+	/* Emulated fallback: close/fcntl are both in Android's policy on
+	 * every version we target, so no risk of re-nesting SIGSYS. */
+	if (flags & ~CLOSE_RANGE_CLOEXEC) return TAWC_EINVAL;
+	struct { unsigned long cur, max; } rl = { 0, 0 };
+	long g = TAWC_RAW(TAWC_SYS_prlimit64, 0, 7 /*RLIMIT_NOFILE*/,
+			  0, (long)&rl, 0, 0);
+	unsigned int cap = (g == 0 && rl.cur > 0 && rl.cur < (1u << 20))
+			 ? (unsigned int)rl.cur : 4096u;
+	if (last > cap - 1) last = cap - 1;
+
+	for (unsigned int fd = first; fd <= last; fd++) {
+		if (!tawcroot_fd_is_reserved((int)fd)) {
+			if (flags & CLOSE_RANGE_CLOEXEC)
+				(void)TAWC_RAW(TAWC_SYS_fcntl, fd, F_SETFD,
+					      FD_CLOEXEC, 0, 0, 0);
+			else
+				(void)TAWC_RAW(TAWC_SYS_close, fd, 0, 0, 0, 0, 0);
+		}
+		if (fd == last) break;  /* avoid wraparound if last == UINT_MAX-capped */
+	}
+	return 0;
 }
 
 static long handle_dup(const tawcroot_syscall_args *args, ucontext_t *uc)
