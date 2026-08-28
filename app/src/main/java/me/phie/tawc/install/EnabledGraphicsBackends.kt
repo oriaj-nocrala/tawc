@@ -7,9 +7,9 @@ import me.phie.tawc.GraphicsBackend
  * Build-time gate for the graphics backends this APK ships. Driven by
  * the `GRAPHICS_*_ENABLED` BuildConfig fields set in
  * `app/build.gradle.kts` (override with
- * `-PtawcGraphics=libhybris,libhybris-zink,gfxstream,cpu`).
+ * `-PtawcGraphics=libhybris,libhybris-zink,gfxstream,cpu,libhybris-gl4es`).
  *
- * Default: all four enabled unless the build wrapper passes a leaner
+ * Default: all five enabled unless the build wrapper passes a leaner
  * production set. Disabling `gfxstream` removes the kumquat/gfxstream
  * Rust feature, skips
  * `libgfxstream_backend.so`, and drops the Mesa gfxstream-vk assets.
@@ -28,12 +28,14 @@ object EnabledGraphicsBackends {
     val libhybrisZink: Boolean = BuildConfig.GRAPHICS_LIBHYBRIS_ZINK_ENABLED
     val gfxstream: Boolean = BuildConfig.GRAPHICS_GFXSTREAM_ENABLED
     val cpu: Boolean = BuildConfig.GRAPHICS_CPU_ENABLED
+    val libhybrisGl4es: Boolean = BuildConfig.GRAPHICS_LIBHYBRIS_GL4ES_ENABLED
 
     fun isEnabled(backend: GraphicsBackend): Boolean = when (backend) {
         GraphicsBackend.LIBHYBRIS -> libhybris
         GraphicsBackend.LIBHYBRIS_ZINK -> libhybrisZink
         GraphicsBackend.GFXSTREAM -> gfxstream
         GraphicsBackend.CPU -> cpu
+        GraphicsBackend.LIBHYBRIS_GL4ES -> libhybrisGl4es
     }
 
     /** Backends this APK ships, in enum declaration order. Settings

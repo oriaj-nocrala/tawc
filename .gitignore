@@ -23,6 +23,10 @@ app/src/main/assets/mesa-gfxstream/
 # packed by packMesaZink — see notes/libhybris-zink.md)
 app/src/main/assets/mesa-zink/
 
+# gl4es asset (built by the buildGl4es Gradle task, packed by
+# packGl4es — see notes/libhybris-gl4es.md)
+app/src/main/assets/gl4es/
+
 # IDE
 .idea/
 *.iml

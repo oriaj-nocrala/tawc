@@ -37,6 +37,10 @@ import me.phie.tawc.Settings
  * bypassing the distro Vulkan loader — libhybris isn't a loader-ABI
  * compliant ICD. See
  * [notes/libhybris-zink.md](../../../../../../../notes/libhybris-zink.md).
+ * LibhybrisGl4es layers gl4es's `libGL.so.1` ahead of libhybris's own
+ * dir on `LD_LIBRARY_PATH` and forces the `x11` EGL platform — an
+ * edge-case backend for legacy desktop-GL apps only. See
+ * [notes/libhybris-gl4es.md](../../../../../../../notes/libhybris-gl4es.md).
  */
 internal object RootfsEnv {
     enum class Method { TAWCROOT, PROOT, CHROOT }
@@ -146,6 +150,29 @@ internal object RootfsEnv {
                 // dispatches EGL straight to libhybris's GLES-only libEGL,
                 // bypassing Zink. Pin the vendor list to Mesa's entry.
                 put("__EGL_VENDOR_LIBRARY_FILENAMES", "/usr/share/glvnd/egl_vendor.d/50_mesa.json")
+            }
+            GraphicsBackend.LIBHYBRIS_GL4ES -> {
+                // gl4es's own libGL.so.1 (built by scripts/build-gl4es.sh,
+                // shipped by [Gl4esInstallProvider]) goes ahead of the raw
+                // libhybris dir — no gl-shims/ here, gl4es defines its own
+                // real glX* symbols and dlopens libEGL.so/libGLESv2.so by
+                // name at runtime (libtool's unversioned symlinks in
+                // libhybris's own /usr/lib/hybris/, not the gl-shims
+                // GLX-null wrapper this backend doesn't need).
+                put("LD_LIBRARY_PATH",
+                    "${Gl4esInstallProvider.GUEST_LIB_DIR}:${LibhybrisInstallProvider.GUEST_LIB_DIR}")
+                // gl4es must create its EGL context through libhybris's
+                // `x11` EGL platform (plain eglGetDisplay(x11_display)),
+                // not `wayland`. libhybris's own `-DHYBRIS` build mode
+                // (Ubuntu Touch's eglGetPlatformDisplay(EGL_PLATFORM_ANDROID_KHR)
+                // route) segfaults in eglCreateWindowSurface for gl4es — see
+                // notes/libhybris-gl4es.md.
+                put("HYBRIS_EGLPLATFORM", "x11")
+                // gl4es's own hardware-capability probe against
+                // EGL_DEFAULT_DISPLAY runs before the app's real
+                // eglCreateWindowSurface and can wedge context creation on
+                // this stack; skip it (notes/libhybris-gl4es.md).
+                put("LIBGL_NOTEST", "1")
             }
         }
         put("DISPLAY", ":0")

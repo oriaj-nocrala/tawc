@@ -154,6 +154,7 @@ at the same gate.
 |---|---|---|---|---|
 | OnePlus 9 | Android 14 | Adreno 660v2 | **1.1.128** | 0.530.0 |
 | Pixel 4a | Android 16 | Adreno 618 | **1.1.128** | 0.490.0 |
+| Lenovo Tab P11 / J606L | Android 11 | Adreno 610 | **1.1.128** | 0.502.0 |
 
 Trace from the OnePlus (via temporary `fprintf(stderr, …)` prints):
 

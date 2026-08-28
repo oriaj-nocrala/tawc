@@ -46,6 +46,7 @@ pub enum GraphicsBackend {
     Gfxstream,
     Cpu,
     LibhybrisZink,
+    LibhybrisGl4es,
 }
 
 impl GraphicsBackend {
@@ -55,6 +56,7 @@ impl GraphicsBackend {
             GraphicsBackend::Gfxstream => "gfxstream",
             GraphicsBackend::Cpu => "cpu",
             GraphicsBackend::LibhybrisZink => "libhybris-zink",
+            GraphicsBackend::LibhybrisGl4es => "libhybris-gl4es",
         }
     }
 }

@@ -31,7 +31,7 @@ const STREAM_ERR: u8 = 5;
 pub fn print_usage() {
     eprintln!("usage: tawc-exec [--foreground-app] [--cwd DIR] [--env K=V ...] [--op-title TITLE] -- ARGV0 [ARG ...]");
     eprintln!("       tawc-exec [--foreground-app] --action NAME [--arg K=V ...]");
-    eprintln!("       tawc-exec [--foreground-app] --in-rootfs ID [--graphics libhybris|gfxstream|cpu|libhybris-zink] [--op-title TITLE] [-- CMD ...]");
+    eprintln!("       tawc-exec [--foreground-app] --in-rootfs ID [--graphics libhybris|gfxstream|cpu|libhybris-zink|libhybris-gl4es] [--op-title TITLE] [-- CMD ...]");
 }
 
 /// Top-level invocation kind. Mirrors the wire protocol: an ARGV-form
@@ -57,7 +57,7 @@ pub enum Request {
     /// to the install's [InstallationMethod.startInside]. `cmd` empty =
     /// interactive `bash -l`. `graphics` non-empty overrides the
     /// in-rootfs `GraphicsBackend` for this spawn (libhybris / gfxstream
-    /// / cpu / libhybris-zink) without touching the user's persisted Settings pick;
+    /// / cpu / libhybris-zink / libhybris-gl4es) without touching the user's persisted Settings pick;
     /// empty means "use Settings". Tests use this to run a single
     /// client under a specific backend.
     RunInside {
@@ -590,7 +590,7 @@ fn write_header(s: &mut TcpStream, p: &Request) -> io::Result<()> {
                 h.push('\n');
             }
             // GRAPHICS key is a programmatic identifier (libhybris /
-            // gfxstream / cpu / libhybris-zink); no encoding needed.
+            // gfxstream / cpu / libhybris-zink / libhybris-gl4es); no encoding needed.
             if let Some(g) = graphics {
                 h.push_str("GRAPHICS ");
                 h.push_str(g);

@@ -460,6 +460,8 @@ class CompositorService : Service() {
         private val MESA_GFXSTREAM_EXTRACT_LOCK = Any()
         /** Lock for [ensureMesaZinkExtracted] — see method KDoc. */
         private val MESA_ZINK_EXTRACT_LOCK = Any()
+        /** Lock for [ensureGl4esExtracted] — see method KDoc. */
+        private val GL4ES_EXTRACT_LOCK = Any()
 
         /**
          * Stamp value written to `<destDir>/.version` to gate
@@ -784,6 +786,76 @@ class CompositorService : Service() {
             atomicReplaceDir(stagingDir, destDir)
             File(destDir, ".version").writeText(currentStamp)
             Log.i(TAG, "Extracted mesa-zink ($abi) to $destDir")
+            return true
+        }
+
+        /**
+         * Extracts the APK-bundled gl4es tree (`libGL.so.1`, built by
+         * `scripts/build-gl4es.sh`) to `<filesDir>/gl4es/`. Consumed
+         * only by the [me.phie.tawc.GraphicsBackend.LIBHYBRIS_GL4ES]
+         * edge-case backend — see
+         * [me.phie.tawc.install.Gl4esInstallProvider] and
+         * `notes/libhybris-gl4es.md`. Other backends never load this lib.
+         *
+         * Returns true on success or if no asset is shipped for this ABI.
+         */
+        fun ensureGl4esExtracted(context: Context): Boolean = synchronized(GL4ES_EXTRACT_LOCK) {
+            val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: return false
+            val assetPath = "gl4es/$abi/gl4es.tar"
+            val available = try {
+                context.assets.open(assetPath).close()
+                true
+            } catch (_: java.io.IOException) {
+                false
+            }
+            if (!available) {
+                logMissingAssetOnce(
+                    "gl4es",
+                    "No gl4es asset shipped for ABI $abi; LIBHYBRIS_GL4ES backend unavailable",
+                )
+                return false
+            }
+
+            val destDir = File(context.filesDir, "gl4es")
+            val currentStamp = currentExtractStamp(context)
+            if (!isStampStale("gl4es", destDir, currentStamp)) {
+                return true
+            }
+
+            val stagingDir = File(context.filesDir, "gl4es.new")
+            stagingDir.deleteRecursively()
+            stagingDir.mkdirs()
+            val stagingReal = stagingDir.canonicalFile
+            val stagingPrefix = stagingReal.absolutePath + File.separator
+            context.assets.open(assetPath).use { raw ->
+                TarArchiveInputStream(raw).use { tar ->
+                    while (true) {
+                        val entry = tar.nextEntry ?: break
+                        val outFile = File(stagingDir, entry.name).canonicalFile
+                        val abs = outFile.absolutePath
+                        if (abs != stagingReal.absolutePath && !abs.startsWith(stagingPrefix)) {
+                            throw java.io.IOException("gl4es tar entry escapes staging: ${entry.name}")
+                        }
+                        when {
+                            entry.isDirectory -> outFile.mkdirs()
+                            entry.isSymbolicLink -> {
+                                outFile.parentFile?.mkdirs()
+                                Os.symlink(entry.linkName, outFile.absolutePath)
+                            }
+                            else -> {
+                                outFile.parentFile?.mkdirs()
+                                outFile.outputStream().use { out -> tar.copyTo(out) }
+                                if ((entry.mode and 0b001_001_001) != 0) {
+                                    outFile.setExecutable(true, false)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            atomicReplaceDir(stagingDir, destDir)
+            File(destDir, ".version").writeText(currentStamp)
+            Log.i(TAG, "Extracted gl4es ($abi) to $destDir")
             return true
         }
 

@@ -153,7 +153,9 @@ OP_TITLE arch: pacman -Syu
   via `bash -lc <command>` inside the rootfs. Omit for interactive
   `bash -l`.
 - `GRAPHICS <key>` (RUNINSIDE-form only) — optional. One of
-  `libhybris` / `gfxstream` / `cpu`; unknown keys are rejected. When
+  `libhybris` / `gfxstream` / `cpu` / `libhybris-zink` / `libhybris-gl4es`
+  (driven by `GraphicsBackend.entries`, not a hardcoded list — see
+  `ExecBrokerSession.kt`); unknown keys are rejected. When
   set, the broker passes this through to `InstallationMethod.startInside`
   and `RootfsEnv` uses it instead of `Settings.graphicsBackend` for
   this spawn only. Tests use it to run a single client under a

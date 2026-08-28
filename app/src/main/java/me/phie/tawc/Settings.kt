@@ -217,7 +217,23 @@ enum class GraphicsBackend(val key: String, val displayName: String) {
      * is set; the distro's own Mesa picks llvmpipe via
      * `LIBGL_ALWAYS_SOFTWARE=1` + `GALLIUM_DRIVER=llvmpipe`.
      */
-    CPU("cpu", "CPU");
+    CPU("cpu", "CPU"),
+
+    /**
+     * [LIBHYBRIS] plus [gl4es](https://github.com/ptitSeb/gl4es), a
+     * desktop-GL-to-GLES2 translation library, layered in front of
+     * libhybris's GLES/EGL via `LD_LIBRARY_PATH`. Edge-case backend for
+     * legacy fixed-function desktop-GL apps (`glxgears`,
+     * `glTranslated`/`glRotatef`-style immediate mode) that the
+     * [LIBHYBRIS] `gl-shims/` GLES-only wrapper can't run at all — see
+     * `notes/libhybris-gl4es.md`. Not a general desktop-GL fix: gl4es
+     * caps at GL 2.1/GLSL 1.20 (misses GL 3.x apps like kitty), is
+     * X11/GLX-only (no native Wayland clients), and uses a single
+     * global GL context (not thread-safe) — [LIBHYBRIS] stays the
+     * default for everything else, including native Vulkan apps, which
+     * this backend does not touch.
+     */
+    LIBHYBRIS_GL4ES("libhybris-gl4es", "libhybris+gl4es (legacy GL)");
 
     companion object {
         /**

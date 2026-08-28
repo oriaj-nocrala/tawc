@@ -299,20 +299,29 @@ function); ours is smaller because the macro generates the assembly.
 **Upstream PRs worth re-evaluating if we push further on vkcube:**
 - PR #604: Mali `currentExtent` fix, `maxImageExtent` raise, opaque alpha support
 
-## Desktop GL: gl4es evaluated and rejected (2026-07-06)
+## Desktop GL: gl4es rejected as default, shipped as an edge-case backend (2026-07-06, revisited 2026-08-28)
 
 [ptitSeb/gl4es](https://github.com/ptitSeb/gl4es) (desktop GL → GLES2
-translator) was spike-tested on the OnePlus 9 and **works** over
-libhybris — `glxinfo` under XWayland reports
+translator) was spike-tested on the OnePlus 9 (2026-07-06) and **works**
+over libhybris — `glxinfo` under XWayland reports
 `OpenGL 2.1 gl4es wrapper 1.1.7 / GL4ES using Adreno (TM) 660`,
-glxgears runs the full GPU path. Rejected anyway: hard GL 2.1 compat /
-GLSL 1.20 ceiling (no 3.x contexts, textual shader translator), so it
-misses every app we care about (kitty and friends need GL 3.3 core);
-X11/GLX only; single-global-context (not thread-safe). Old-GL-on-X11
-apps alone aren't worth shipping a layer for. The modern-GL gap on
-Vulkan 1.1 devices is instead
+glxgears runs the full GPU path. Rejected as the *default* GL path: hard
+GL 2.1 compat / GLSL 1.20 ceiling (no 3.x contexts, textual shader
+translator), so it misses every app we care about most (kitty and
+friends need GL 3.3 core); X11/GLX only; single-global-context (not
+thread-safe). The modern-GL gap on Vulkan 1.1 devices is instead
 [plans/gl-on-gles-translator.md](../plans/gl-on-gles-translator.md);
 zink remains the endgame on Vulkan 1.3+ hardware.
+
+Re-confirmed working on a second, weaker device (Lenovo Tab P11 / Adreno
+610, Vulkan 1.1.128) on 2026-08-28, and shipped as the opt-in
+[`GraphicsBackend.LIBHYBRIS_GL4ES`](../app/src/main/java/me/phie/tawc/Settings.kt)
+backend — not the default, not a fix for the GL 3.x gap above, just an
+edge-case escape hatch for legacy fixed-function desktop-GL apps
+(`glxgears`, anything calling `glTranslated`/`glRotatef`/immediate-mode
+`glBegin`/`glEnd`) that the default `LIBHYBRIS` backend's GLES-only
+`gl-shims/` wrapper can't run at all. See
+[notes/libhybris-gl4es.md](libhybris-gl4es.md) for the integration.
 
 Durable facts from the spike, useful to any GL-on-GLES front-end:
 

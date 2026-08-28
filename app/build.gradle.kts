@@ -23,20 +23,21 @@ run {
     }
 }
 
-// Per-build enabled graphics backends. Default: all four unless the
+// Per-build enabled graphics backends. Default: all five unless the
 // caller passes a production set (scripts/build-release-apk.sh does).
 // Override with
-// `-PtawcGraphics=libhybris,libhybris-zink,gfxstream,cpu`.
+// `-PtawcGraphics=libhybris,libhybris-zink,gfxstream,cpu,libhybris-gl4es`.
 // Disabling gfxstream removes the Rust kumquat/gfxstream feature,
 // skips libgfxstream_backend.so, and drops the Mesa gfxstream-vk
 // assets. Disabling both gfxstream and libhybris-zink skips the Mesa
-// cross-build entirely. See
+// cross-build entirely. Disabling libhybris-gl4es skips the gl4es
+// cross-build and its ~1.5 MB asset. See
 // `me.phie.tawc.install.EnabledGraphicsBackends`.
 val explicitTawcGraphics: Set<String>? = (project.findProperty("tawcGraphics") as String?)
     ?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet()
 val enabledGraphics: Set<String> = explicitTawcGraphics
-    ?: setOf("libhybris", "libhybris-zink", "gfxstream", "cpu")
-val knownGraphics = setOf("libhybris", "libhybris-zink", "gfxstream", "cpu")
+    ?: setOf("libhybris", "libhybris-zink", "gfxstream", "cpu", "libhybris-gl4es")
+val knownGraphics = setOf("libhybris", "libhybris-zink", "gfxstream", "cpu", "libhybris-gl4es")
 run {
     val unknown = enabledGraphics - knownGraphics
     require(unknown.isEmpty()) { "Unknown tawcGraphics: $unknown (allowed: $knownGraphics)" }
@@ -46,6 +47,7 @@ run {
 }
 val libhybrisZinkEnabled: Boolean = "libhybris-zink" in enabledGraphics
 val gfxstreamEnabled: Boolean = "gfxstream" in enabledGraphics
+val libhybrisGl4esEnabled: Boolean = "libhybris-gl4es" in enabledGraphics
 val mesaBuildNeeded: Boolean = gfxstreamEnabled || libhybrisZinkEnabled
 
 fun booleanProjectPropertyOrNull(name: String): Boolean? {
@@ -129,6 +131,7 @@ android {
             buildConfigField("boolean", "GRAPHICS_LIBHYBRIS_ZINK_ENABLED", "${"libhybris-zink" in enabledGraphics}")
             buildConfigField("boolean", "GRAPHICS_GFXSTREAM_ENABLED",      "${"gfxstream" in enabledGraphics}")
             buildConfigField("boolean", "GRAPHICS_CPU_ENABLED",            "${"cpu" in enabledGraphics}")
+            buildConfigField("boolean", "GRAPHICS_LIBHYBRIS_GL4ES_ENABLED", "$libhybrisGl4esEnabled")
             buildConfigField("boolean", "XWAYLAND_ENABLED", "$xwaylandPackaged")
             buildConfigField("boolean", "TINT_BUFFERS_BY_TYPE_DEFAULT", "true")
         }
@@ -156,6 +159,7 @@ android {
             buildConfigField("boolean", "GRAPHICS_LIBHYBRIS_ZINK_ENABLED", "${"libhybris-zink" in enabledGraphics}")
             buildConfigField("boolean", "GRAPHICS_GFXSTREAM_ENABLED",      "${"gfxstream" in enabledGraphics}")
             buildConfigField("boolean", "GRAPHICS_CPU_ENABLED",            "${"cpu" in enabledGraphics}")
+            buildConfigField("boolean", "GRAPHICS_LIBHYBRIS_GL4ES_ENABLED", "$libhybrisGl4esEnabled")
             buildConfigField("boolean", "XWAYLAND_ENABLED", "$xwaylandPackaged")
             buildConfigField("boolean", "TINT_BUFFERS_BY_TYPE_DEFAULT", "false")
         }
@@ -292,6 +296,11 @@ android {
     if (!libhybrisZinkEnabled) {
         androidResources {
             ignoreAssetsPatterns.add("mesa-zink")
+        }
+    }
+    if (!libhybrisGl4esEnabled) {
+        androidResources {
+            ignoreAssetsPatterns.add("gl4es")
         }
     }
 }
@@ -782,6 +791,56 @@ if ("arm64-v8a" in tawcAbis) {
         dependsOn(packLibhybrisTask)
     }
 } // end libhybris (arm64-v8a in tawcAbis)
+
+// Cross-compile gl4es for the LIBHYBRIS_GL4ES edge-case backend and
+// pack it as an APK asset. Extracted at runtime by
+// CompositorService.ensureGl4esExtracted and copied into each rootfs
+// as a real file by Gl4esInstallProvider. Same shape as buildLibhybris
+// above — the actual cross-compile lives in scripts/build-gl4es.sh so
+// it can be run by hand for development.
+//
+// Only aarch64 (same constraint as libhybris) and only when the
+// backend is enabled at build time.
+if ("arm64-v8a" in tawcAbis && libhybrisGl4esEnabled) {
+    val tawcRoot = rootProject.projectDir
+    val gl4esAbi = "arm64-v8a"
+    val gl4esInstallDir = "$tawcRoot/build/gl4es-aarch64/install/usr/lib/gl4es"
+    val gl4esTar = "$tawcRoot/build/gl4es-aarch64/install/usr/lib/gl4es.tar"
+    val gl4esAssetDir = "src/main/assets/gl4es/$gl4esAbi"
+
+    val buildGl4esTask = tasks.register<Exec>("buildGl4es") {
+        workingDir = tawcRoot
+        commandLine("scripts/build-gl4es.sh")
+        // Same incremental-input contract as buildLibhybris: the build
+        // script itself, the dep pin (so a gl4es commit bump
+        // invalidates the cache), and libhybris's stub dir (build-gl4es.sh
+        // builds it on demand if missing, but Gradle still needs to
+        // know a libhybris rebuild should invalidate this too).
+        inputs.file("$tawcRoot/scripts/build-gl4es.sh")
+        inputs.file("$tawcRoot/deps/deps.list")
+        inputs.file("$tawcRoot/scripts/lib/deps.sh")
+        inputs.property("depTreeState", depTreeState("gl4es"))
+        outputs.dir(gl4esInstallDir)
+        outputs.file(gl4esTar)
+    }
+
+    val packGl4esTask = tasks.register<Copy>("packGl4es") {
+        dependsOn(buildGl4esTask)
+        into("${project.projectDir}/$gl4esAssetDir")
+        from(gl4esTar) { rename { "gl4es.tar" } }
+    }
+
+    tasks.named("preBuild") {
+        dependsOn(packGl4esTask)
+    }
+} else {
+    tasks.register<Delete>("pruneStaleGl4esAssets") {
+        delete("src/main/assets/gl4es")
+    }
+    tasks.named("preBuild") {
+        dependsOn("pruneStaleGl4esAssets")
+    }
+} // end gl4es
 
 // Cross-build Mesa's chroot-side graphics bits when a Mesa-backed
 // backend is enabled:

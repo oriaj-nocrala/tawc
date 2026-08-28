@@ -363,6 +363,11 @@ class TawcrootMethod(context: Context) : InstallationMethod {
         ) {
             add(assetBind("mesa-gfxstream", BridgeInstallProvider.GUEST_LIB_DIR))
         }
+        if (EnabledGraphicsBackends.libhybrisGl4es &&
+            CompositorService.ensureGl4esExtracted(appContext)
+        ) {
+            add(assetBind("gl4es", Gl4esInstallProvider.GUEST_LIB_DIR))
+        }
     }
 
     /** `<filesDir>/<name>` bound read-only at [guestDir]. */
