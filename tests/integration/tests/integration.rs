@@ -5,6 +5,7 @@ mod cpu_graphics;
 mod gfxstream;
 mod launcher;
 mod libhybris;
+mod libhybris_gl4es;
 mod libhybris_zink;
 mod linker_config;
 mod rendering;
