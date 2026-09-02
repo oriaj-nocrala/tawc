@@ -102,6 +102,27 @@ APK's `libhybris/<abi>.tar` asset, extracted at runtime, and exposed
 in the rootfs at `/usr/lib/hybris/gl-shims/` (real file copy via
 `TawcInstaller`/`LibhybrisInstallProvider`).
 
+`libGL.so.1` additionally carries no-op stubs for the desktop-GL entry
+points listed in `deps/libhybris-shims/gl-desktop-abi.txt` (GL 1.0-1.2
+fixed-function, the ARB_imaging subset, ARB_multitexture), generated at
+build time for the names libhybris's own GLESv2 does not define.
+"No desktop GL" is a policy about *functionality*, not about the ABI: a
+binary whose DT_NEEDED names `libGL.so.1` and whose relocations reference
+those entry points dies at exec with `undefined symbol` before any of its
+own code runs, so it never reaches the NULL-`glX*` probes that would have
+steered it to EGL. The rootfs Xwayland was exactly that binary — it died
+on `glConvolutionParameterfv`, and since KWin pre-creates
+`/tmp/.X11-unix/X0` and starts Xwayland lazily, the corpse left every X
+client of that session blocked forever in the X handshake (which in turn
+wedged `kcminit_startup`'s `xrdb` and hung the whole Plasma session).
+
+The stubs live only in `libGL.so.1` — never in `libGLESv2.so.2`, which
+libepoxy dlsyms and which must keep presenting a GLES-only surface — and
+never shadow a name libhybris GLESv2 defines. `build-libhybris.sh`
+enforces both with post-link checks. Keep the list free of modern GL: a
+shader-era symbol stubbed there would let a probe conclude the entry
+point works and call it, which is worse than not finding it.
+
 If we ever switch back on `--enable-glvnd` in libhybris and arrange
 for libglvnd to be present *without* Mesa (or with Mesa neutered),
 the shims become unnecessary. Until then they're the lesser evil.

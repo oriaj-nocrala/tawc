@@ -952,6 +952,12 @@ get it. GLES via EGL is the only client GL. This matches
 probes fall through to EGL). It removes GLX, libGL-stub-extensions,
 indirect-rendering, and Mesa from the plan entirely.
 
+The policy is about functionality, not the ABI. `gl-shims/libGL.so.1`
+does export no-op stubs for the desktop-GL entry points an X server's
+generated GLX dispatch references — otherwise such a binary cannot even
+load. See `notes/wsi-layer.md` and
+`deps/libhybris-shims/gl-desktop-abi.txt`.
+
 **No GBM, no DRI3-style dmabuf passing.** Stock Android phones don't
 expose `/dev/dri/renderD*` or dmabuf fds for AHB. Every protocol
 seam in the X-server stack that wants a dmabuf is replaced with
