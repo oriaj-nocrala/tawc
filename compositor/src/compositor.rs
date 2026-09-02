@@ -31,7 +31,7 @@ use smithay::reexports::wayland_protocols_misc::server_decoration::server::{
     },
     org_kde_kwin_server_decoration_manager::Mode as KdeDefaultDecorationMode,
 };
-use smithay::utils::Serial;
+use smithay::utils::{Clock, Logical, Monotonic, Point, Serial};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     self, CompositorClientState, CompositorHandler, CompositorState,
@@ -48,7 +48,7 @@ use std::os::fd::OwnedFd;
 use smithay::desktop::{
     find_popup_root_surface, PopupGrab, PopupKeyboardGrab, PopupManager, PopupPointerGrab, Window,
 };
-use smithay::input::pointer::Focus as PointerFocusMode;
+use smithay::input::pointer::{Focus as PointerFocusMode, PointerHandle};
 use smithay::wayland::shell::kde::decoration::{
     KdeDecorationHandler, KdeDecorationState,
 };
@@ -58,6 +58,13 @@ use smithay::wayland::shell::xdg::{
 };
 use smithay::wayland::shell::xdg::decoration::{XdgDecorationHandler, XdgDecorationState};
 use smithay::wayland::shm::{ShmHandler, ShmState};
+use smithay::wayland::keyboard_shortcuts_inhibit::{
+    KeyboardShortcutsInhibitHandler, KeyboardShortcutsInhibitState, KeyboardShortcutsInhibitor,
+};
+use smithay::wayland::pointer_constraints::{PointerConstraintsHandler, PointerConstraintsState};
+use smithay::wayland::presentation::PresentationState;
+use smithay::wayland::single_pixel_buffer::SinglePixelBufferState;
+use smithay::wayland::xdg_toplevel_icon::{XdgToplevelIconHandler, XdgToplevelIconManager};
 use smithay::wayland::viewporter::ViewporterState;
 use smithay::wayland::xwayland_shell::XWaylandShellState;
 use smithay::xwayland::{X11Surface, X11Wm, XWaylandActivation, XWaylandClientData};
@@ -121,6 +128,22 @@ pub struct TawcState {
     // Held to keep wp_fractional_scale_manager_v1 registered.
     #[allow(dead_code)]
     pub fractional_scale_manager_state: FractionalScaleManagerState,
+    // Held to keep wp_presentation registered; feedback is drained by
+    // render::send_presentation_feedback, never through this field.
+    #[allow(dead_code)]
+    pub presentation_state: PresentationState,
+    // Held to keep xdg_toplevel_icon_manager_v1 registered. tawc draws no
+    // window decorations, so the icons themselves go unused.
+    #[allow(dead_code)]
+    pub xdg_toplevel_icon_manager: XdgToplevelIconManager,
+    // Reached by smithay's delegate macro through the
+    // `KeyboardShortcutsInhibitHandler` impl.
+    pub keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
+    /// CLOCK_MONOTONIC, the clock wp_presentation advertises to clients.
+    pub clock: Clock<Monotonic>,
+    /// Monotonically increasing frame counter reported in wp_presentation
+    /// feedback. Not a real vblank sequence — we have no scanout counter.
+    pub presentation_seq: u64,
     pub data_device_state: DataDeviceState,
     pub seat_state: SeatState<Self>,
     pub seat: Seat<Self>,
@@ -271,6 +294,7 @@ impl TawcState {
         // v6 so we can send wl_surface.preferred_buffer_scale per surface
         // as the integer fallback. Clients that support fractional scaling
         // get the real value through wp_fractional_scale_v1.
+        let clock = Clock::<Monotonic>::new();
         let compositor_state = CompositorState::new_v6::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&dh);
@@ -288,6 +312,31 @@ impl TawcState {
         // the surface on a scaled output. The returned `ViewporterState` has no
         // Drop impl — the global lives for the lifetime of the Display.
         ViewporterState::new::<Self>(&dh);
+        // wp_single_pixel_buffer_manager_v1 hands out 1x1 solid-colour
+        // wl_buffers with no storage behind them, which clients scale up with
+        // wp_viewporter instead of allocating a real buffer for a flat fill.
+        // Cheap for us (smithay turns them into a solid-colour render element,
+        // no import path involved) and a hard requirement for some clients:
+        // KWin's nested Wayland backend aborts startup outright when the host
+        // compositor lacks it. Like ViewporterState, the returned state has no
+        // Drop impl — the global lives for the lifetime of the Display.
+        SinglePixelBufferState::new::<Self>(&dh);
+        // zwp_pointer_constraints_v1. tawc never activates a constraint (see
+        // the PointerConstraintsHandler impl below) but advertising the global
+        // is not a lie: the protocol lets a compositor decline to lock or
+        // confine at any time, and clients that treat it as mandatory refuse
+        // to start without it — KWin's nested backend is one.
+        PointerConstraintsState::new::<Self>(&dh);
+        // wp_presentation. Timestamps come from `clock` below; the feedback
+        // callbacks are drained once per frame in render::send_presentation_feedback.
+        let presentation_state = PresentationState::new::<Self>(&dh, clock.id() as u32);
+        // xdg_toplevel_icon_manager_v1. Accepted and ignored — Android draws
+        // the task-switcher icon from the desktop entry (see launcher.rs), not
+        // from client-supplied toplevel icons.
+        let xdg_toplevel_icon_manager = XdgToplevelIconManager::new::<Self>(&dh);
+        // zwp_keyboard_shortcuts_inhibit_manager_v1. tawc has no compositor-level
+        // key bindings to inhibit, so every request is granted.
+        let keyboard_shortcuts_inhibit_state = KeyboardShortcutsInhibitState::new::<Self>(&dh);
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&dh, "tawc");
         // Advertise only input devices tawc actually has. Android touch
@@ -341,6 +390,11 @@ impl TawcState {
             xdg_decoration_state,
             kde_decoration_state,
             fractional_scale_manager_state,
+            presentation_state,
+            xdg_toplevel_icon_manager,
+            keyboard_shortcuts_inhibit_state,
+            clock,
+            presentation_seq: 0,
             data_device_state,
             seat_state,
             seat,
@@ -1300,5 +1354,41 @@ impl SelectionHandler for TawcState {
         }
     }
 }
+
+impl PointerConstraintsHandler for TawcState {
+    fn new_constraint(&mut self, _surface: &WlSurface, _pointer: &PointerHandle<Self>) {
+        // Never activated. tawc's seat carries a keyboard and a touchscreen;
+        // the only wl_pointer it ever exposes is the cold-crossing shim in
+        // gtk3_menus_workaround, which delivers no motion. There is nothing to
+        // lock or confine, so leaving the constraint inactive is the truthful
+        // answer — the client keeps its zwp_locked_pointer_v1 object and simply
+        // never sees `locked`.
+    }
+
+    fn remove_constraint(&mut self, _surface: &WlSurface, _pointer: &PointerHandle<Self>) {}
+
+    fn cursor_position_hint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &PointerHandle<Self>,
+        _location: Point<f64, Logical>,
+    ) {
+    }
+}
+
+impl KeyboardShortcutsInhibitHandler for TawcState {
+    fn keyboard_shortcuts_inhibit_state(&mut self) -> &mut KeyboardShortcutsInhibitState {
+        &mut self.keyboard_shortcuts_inhibit_state
+    }
+
+    fn new_inhibitor(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
+        // Nothing to hand over: tawc intercepts no key combinations of its own,
+        // so grant every request rather than leaving clients waiting.
+        inhibitor.activate();
+    }
+}
+
+// Icons are accepted and dropped; the default `set_icon` is a no-op.
+impl XdgToplevelIconHandler for TawcState {}
 
 delegate_dispatch2!(TawcState);

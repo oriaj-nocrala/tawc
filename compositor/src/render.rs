@@ -30,6 +30,9 @@ use smithay::backend::renderer::utils::{
 use smithay::reexports::wayland_server::protocol::{wl_buffer::WlBuffer, wl_surface::WlSurface};
 use smithay::utils::user_data::UserDataMap;
 use smithay::utils::{Buffer as BufferCoord, Physical, Rectangle, Scale, Size, Transform};
+use smithay::desktop::utils::OutputPresentationFeedback;
+use smithay::wayland::presentation::Refresh;
+use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
 
 use crate::compositor::TawcState;
 use crate::egl_android::AndroidNativeSurface;
@@ -549,4 +552,45 @@ pub fn send_frame_callbacks(state: &TawcState, time: u32) {
             },
         );
     }
+}
+
+/// Drain wp_presentation feedback for the visible windows and report the frame
+/// as presented.
+///
+/// Called on the same tick as `send_frame_callbacks`, which only runs after
+/// `render_visible_host` has drawn anything dirty, so a surface that reaches
+/// here has its current content on screen. There is no scanout completion
+/// signal to wait on — Android owns the actual flip — so the timestamp is the
+/// tick's CLOCK_MONOTONIC reading and no `Kind` flags are claimed. Clients that
+/// get no feedback at all stall their frame pacing (KWin among them), which is
+/// what this exists to avoid.
+pub fn send_presentation_feedback(state: &mut TawcState) {
+    let seq = state.presentation_seq.wrapping_add(1);
+    state.presentation_seq = seq;
+
+    let now = state.clock.now();
+    let refresh = match state.output.current_mode() {
+        Some(mode) if mode.refresh > 0 => {
+            Refresh::Fixed(Duration::from_nanos(1_000_000_000_000u64 / mode.refresh as u64))
+        }
+        _ => Refresh::Unknown,
+    };
+
+    let output = state.output.clone();
+    let mut feedback = OutputPresentationFeedback::new(&output);
+
+    let Some(visible_space) = state.desktop.visible_space(&state.hosts) else {
+        return;
+    };
+    for window in visible_space.elements() {
+        window.take_presentation_feedback(
+            &mut feedback,
+            |_: &WlSurface, _: &smithay::wayland::compositor::SurfaceData| Some(output.clone()),
+            |_: &WlSurface, _: &smithay::wayland::compositor::SurfaceData| {
+                wp_presentation_feedback::Kind::empty()
+            },
+        );
+    }
+
+    feedback.presented(now, refresh, seq, wp_presentation_feedback::Kind::empty());
 }

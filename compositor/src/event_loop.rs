@@ -712,6 +712,7 @@ pub fn run(
         // we skipped rendering.
         let time = data.start_time.elapsed().as_millis() as u32;
         render::send_frame_callbacks(data, time);
+        render::send_presentation_feedback(data);
 
         // Flush so frame callbacks reach the client even on idle ticks. The
         // fd-source dispatcher only flushes on incoming requests; without an
