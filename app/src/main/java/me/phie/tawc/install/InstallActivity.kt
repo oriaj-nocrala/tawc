@@ -97,6 +97,9 @@ class InstallActivity : AppCompatActivity() {
     private var useCacheProxy: Boolean? = null
     private lateinit var cacheProxyCheckbox: CheckBox
 
+    /** Off-main-thread runner for the cache-proxy reachability probe. */
+    private val probeExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+
     /** ando (notes/ando.md) toggle. Off by default, shown for all
      *  methods; persisted across rotations. */
     private var andoEnabled: Boolean = false
@@ -157,6 +160,14 @@ class InstallActivity : AppCompatActivity() {
         scaffold.content.addView(formScroll, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
 
         setContentView(scaffold.root)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // Same contract as DistroInfoActivity's: a queued probe still
+        // runs (its runOnUiThread bails on isFinishing), shutdown() only
+        // stops new work so the worker thread doesn't outlive us.
+        probeExecutor.shutdown()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -673,9 +684,9 @@ class InstallActivity : AppCompatActivity() {
             null
         }
 
-        val launch = {
+        val launch = { proxyUrl: String? ->
             InstallationService.startInstall(
-                this, targetId, methodKey, distroKey, labelText, mirrorProxyUrl, bindsJson, andoEnabled,
+                this, targetId, methodKey, distroKey, labelText, proxyUrl, bindsJson, andoEnabled,
                 selectedBootstrap,
             )
             startActivity(LogScreenActivity.intentFor(this, "install:$targetId"))
@@ -686,25 +697,86 @@ class InstallActivity : AppCompatActivity() {
         // closed at first spawn — i.e. during the install itself. Warn
         // up front instead of letting the install run for minutes and
         // then park in FAILED.
-        if (bindsJson != null &&
-            AllFilesAccess.requiresGrant(pendingBinds) && !AllFilesAccess.granted()
-        ) {
-            com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
-                .setTitle(getString(R.string.install_binds_grant_title))
-                .setMessage(getString(R.string.install_binds_grant_message))
-                .setNegativeButton(getString(R.string.install_binds_grant_anyway)) { _, _ -> launch() }
-                .setPositiveButton(getString(R.string.install_binds_grant_grant)) { _, _ ->
-                    AllFilesAccess.openSettings(this)
-                }
-                .show()
+        val launchGated = { proxyUrl: String? ->
+            if (bindsJson != null &&
+                AllFilesAccess.requiresGrant(pendingBinds) && !AllFilesAccess.granted()
+            ) {
+                com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+                    .setTitle(getString(R.string.install_binds_grant_title))
+                    .setMessage(getString(R.string.install_binds_grant_message))
+                    .setNegativeButton(getString(R.string.install_binds_grant_anyway)) { _, _ ->
+                        launch(proxyUrl)
+                    }
+                    .setPositiveButton(getString(R.string.install_binds_grant_grant)) { _, _ ->
+                        AllFilesAccess.openSettings(this)
+                    }
+                    .show()
+            } else {
+                launch(proxyUrl)
+            }
+        }
+
+        if (mirrorProxyUrl == null) {
+            launchGated(null)
             return
         }
-        launch()
+        // The proxy runs on the *host* and only reaches the device
+        // through `adb reverse` (scripts/cache-proxy.sh run sets both
+        // up). When it isn't running the install dies seconds in with a
+        // bare "Failed to connect to /127.0.0.1:8080" and rolls the
+        // rootfs back — same class of late failure as the binds grant
+        // above, so probe first and offer the obvious way out.
+        installButton.isEnabled = false
+        probeExecutor.execute {
+            val reachable = proxyReachable(mirrorProxyUrl)
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                installButton.isEnabled = true
+                if (reachable) {
+                    launchGated(mirrorProxyUrl)
+                } else {
+                    com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+                        .setTitle(getString(R.string.install_proxy_unreachable_title))
+                        .setMessage(getString(R.string.install_proxy_unreachable_message))
+                        .setPositiveButton(getString(R.string.install_proxy_without)) { _, _ ->
+                            cacheProxyCheckbox.isChecked = false
+                            launchGated(null)
+                        }
+                        .setNegativeButton(getString(R.string.install_proxy_cancel), null)
+                        .show()
+                }
+            }
+        }
+    }
+
+    /**
+     * TCP-connect probe against the cache proxy's host/port. A reachable
+     * proxy answers on localhost through `adb reverse` in well under the
+     * timeout; an absent one refuses immediately. We only care whether
+     * something is listening, so no HTTP request is made — the proxy
+     * answers `404` on `/` anyway (notes/cache-proxy.md).
+     *
+     * Never on the main thread: a connect() there throws
+     * NetworkOnMainThreadException.
+     */
+    private fun proxyReachable(proxyUrl: String): Boolean = try {
+        val u = java.net.URL(proxyUrl)
+        val port = if (u.port != -1) u.port else u.defaultPort
+        java.net.Socket().use { sock ->
+            sock.connect(java.net.InetSocketAddress(u.host, port), PROXY_PROBE_TIMEOUT_MILLIS)
+            true
+        }
+    } catch (_: Exception) {
+        false
     }
 
     companion object {
         /** URL the "Use cache proxy" checkbox sets. Debug-only. */
         private const val DEFAULT_PROXY_URL = "http://127.0.0.1:8080/proxy/"
+
+        /** Loopback connect: generous for a stalled adb, still instant
+         *  on the common "nothing is listening" refusal. */
+        private const val PROXY_PROBE_TIMEOUT_MILLIS = 1_500
         private const val KEY_METHOD = "tawc.install.method"
         private const val KEY_DISTRO = "tawc.install.distro"
         private const val KEY_OTHER_DISTROS = "tawc.install.otherDistrosExpanded"
