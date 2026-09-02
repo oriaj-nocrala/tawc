@@ -178,6 +178,33 @@ tests); see each module's docstring.
 protocol state, missing globals, truncation, and internal invariant
 failures abort the process instead of being tolerated.
 
+### Deploying test programs
+
+`copy_test_app` in the run script pushes each built program to device
+scratch, then copies it into the rootfs as the app uid (via the exec
+broker) — normally into the guest's `/usr/local/bin`.
+
+`libhybris-tls-repro` also needs two companion `.so` files, and those
+must sit under a guest path starting with `/data` (`/data/tawc-tests`):
+libhybris's bionic linker parses the device's real linker config, and
+on current firmware the default namespace is isolated with `/data` in
+`permitted_paths`, so a `dlopen` from e.g. `/usr/local/lib` is rejected
+with "is not accessible for the namespace". It is a guest path *inside*
+the rootfs, unrelated to Android's real `/data`.
+
+Creating that new top-level guest dir can't assume a writable rootfs
+root. A guest owns its own `/` and may chmod it — tawcroot passes guest
+chmods through to the host directory (`handle_fchmodat`) — and 0555 is
+an ordinary mode for a Linux root; a stock Arch `/` is `dr-xr-xr-x`.
+Observed on a Lenovo Tab P11 (`--in-rootfs` Arch install): existing
+top-level dirs stayed writable, but `mkdir .../rootfs/data` failed with
+`Permission denied`. `ensure_rootfs_dir` handles it by lifting the
+owner write bit for the mkdir and putting it back — chmod needs only
+ownership, which the app uid has. Nothing in tawc sets that mode, so
+treat a read-only rootfs root as guest state to tolerate, not a bug to
+fix at install time (an install-time fix would also miss every rootfs
+already on disk).
+
 ### Test Input Mechanism
 
 Tests inject input through Android-facing entry points. Soft-IME scenarios call

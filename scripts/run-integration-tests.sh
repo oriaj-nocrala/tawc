@@ -171,6 +171,27 @@ device_file_sha() {
         | head -n1
 }
 
+# mkdir a directory inside the rootfs, coping with a rootfs root that has
+# no write bit for the uid that owns it.
+#
+# A guest owns its own `/` and is free to chmod it — tawcroot passes
+# guest chmods through to the host directory — and `dr-xr-xr-x` is a
+# perfectly ordinary mode for a Linux root (a stock Arch `/` is 0555).
+# On such an install every *existing* top-level dir is still writable,
+# but a brand-new one (`/data`, below) can't be created. We run as the
+# uid that owns the tree and chmod only needs ownership, so lift the
+# write bit for the mkdir and put it back afterwards.
+ensure_rootfs_dir() {
+    local dir="$1"
+    "$TAWC_EXEC" /system/bin/sh -c "
+        if [ -d '$dir' ]; then exit 0; fi
+        if [ -w '$ROOTFS_DIR' ]; then mkdir -p '$dir'; exit \$?; fi
+        chmod u+w '$ROOTFS_DIR' || exit 1
+        mkdir -p '$dir'; rc=\$?
+        chmod u-w '$ROOTFS_DIR'
+        exit \$rc"
+}
+
 copy_test_app() {
     local name="$1"
     local out_dir="$ROOT_DIR/build/test-apps/$BUILD_DISTRO-$BUILD_ABI/$name"
@@ -210,15 +231,15 @@ copy_test_app() {
     "$TAWC_EXEC" /system/bin/sh -c "mkdir -p $TAWC_SCRATCH"
     adb shell rm -rf "$staging" >/dev/null
     adb push "$out_dir" "$staging" >/dev/null
+    ensure_rootfs_dir "$bin_dir"
     if [ "$name" = "libhybris-tls-repro" ]; then
+        ensure_rootfs_dir "$lib_dir"
         "$TAWC_EXEC" /system/bin/sh -c "\
-            mkdir -p $bin_dir $lib_dir && \
             cp $staging/$name $bin_dir/$name && \
             cp $staging/tls_lib.so $staging/weak_lib.so $lib_dir/ && \
             chmod a+rx $bin_dir/$name $lib_dir/tls_lib.so $lib_dir/weak_lib.so"
     else
         "$TAWC_EXEC" /system/bin/sh -c "\
-            mkdir -p $bin_dir && \
             cp $staging/$name $bin_dir/$name && \
             chmod a+rx $bin_dir/$name"
     fi
