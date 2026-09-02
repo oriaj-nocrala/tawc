@@ -147,6 +147,57 @@ or set `TAWC_MIRROR_PROXY` explicitly. Pacman repo databases are fetched
 directly on each sysroot build so stale cached metadata cannot reference
 package archives that have already rolled off the mirror.
 
+**Do not start `scripts/cache-proxy.sh` (nginx) as an agent.** It's a
+foreground process the human keeps running in their own terminal — see
+[cache-proxy.md](cache-proxy.md) and the `CLAUDE.md` rule. When a device
+already has the needed distro installed with the `full`-profile test
+packages (`cairo libx11 libxcb mesa zlib libpng fontconfig freetype2
+bzip2 brotli expat xorgproto libxext libxrender libxau libxdmcp pixman
+glib2 harfbuzz pcre2 graphite util-linux-libs` — see
+`arch_packages_for_profile()` in `build-host-sysroot.sh` for the current
+list), the preferred way to populate `build/sysroots/<distro>-<abi>/` is
+pulling those packages' files straight out of the device's rootfs over
+`adb` instead of asking the human to start the proxy. Every Arch package
+ships its headers and `.pc` files unsplit, so this fully substitutes for
+a `--profile=full` network fetch:
+
+```bash
+# App must be debuggable (adb run-as works) — true for dev builds.
+ROOTFS=/data/data/me.phie.tawc/distros/<id>/rootfs
+
+# 1. Confirm the packages are actually installed on-device.
+scripts/rootfs-run.sh 'pacman -Qq' | grep -E '^(cairo|libx11|...)$'
+
+# 2. List their files, filter to what a cross-build sysroot needs
+#    (headers, pkgconfig, and the actual libs/archives — not every
+#    file the package ships).
+scripts/rootfs-run.sh 'pacman -Ql <pkg1> <pkg2> ...' \
+  | awk '{ $1=""; sub(/^ /,""); print }' \
+  | grep -v '/$' \
+  | grep -E '^/usr/(include/|lib/pkgconfig/|share/pkgconfig/|lib/[^/]*\.(so[.0-9]*|a)$)' \
+  | sed 's#^/##' | sort -u > filelist.txt
+
+# 3. Pull exactly those files via run-as + tar (no root needed on a
+#    debuggable app), then extract over the existing sysroot.
+adb shell "run-as me.phie.tawc sh -c 'cd $ROOTFS && tar -cf - -T -'" \
+  < filelist.txt > extra.tar
+tar xf extra.tar -C build/sysroots/<distro>-<abi>
+
+# 4. Mark the sysroot 'full' so tests/apps/Makefile's guard
+#    (`grep -q " full " .tawc-sysroot`) doesn't try to re-fetch.
+echo "<distro> <abi> full $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  > build/sysroots/<distro>-<abi>/.tawc-sysroot
+```
+
+A package pacman reports as installed but with no static `.a` (e.g.
+`glib2`'s `libgio-2.0.a`) makes step 3's `tar` exit non-zero after
+printing one `No such file` line per missing entry — harmless, the rest
+of the tar still extracts fine; just don't treat that exit code as fatal.
+This whole dance is a substitute for the `--profile=full` network fetch
+specifically — the `--profile=prod` packages (baseline glibc/wayland/
+mesa/etc. used by production assets, not test apps) are fetched once and
+rarely need touching; don't bother re-deriving those from a device.
+
 ## Environment variables
 
 Gradle needs an Android SDK location. Set one of:
