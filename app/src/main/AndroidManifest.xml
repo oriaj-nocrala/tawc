@@ -45,10 +45,18 @@
         android:theme="@style/Theme.Tawc"
         android:extractNativeLibs="true">
 
+        <!-- screenOrientation is declared here, on CompositorActivity and
+             on TerminalActivity because a freeform window manager (the
+             Lenovo Tab P11's "Free Window" mode) silently refuses to
+             maximize an activity that declares no orientation at all.
+             fullUser rather than a fixed one: it declares support for
+             every orientation while still following the device and the
+             user's rotation-lock setting, so a phone held upright gets
+             portrait. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:screenOrientation="landscape">
+            android:screenOrientation="fullUser">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -70,7 +78,7 @@
             android:theme="@style/Theme.Tawc.Compositor"
             android:documentLaunchMode="intoExisting"
             android:taskAffinity=""
-            android:screenOrientation="landscape"
+            android:screenOrientation="fullUser"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboardHidden"
             android:windowSoftInputMode="stateHidden|adjustResize" />
 
@@ -161,7 +169,7 @@
             android:exported="false"
             android:documentLaunchMode="intoExisting"
             android:taskAffinity=""
-            android:screenOrientation="landscape"
+            android:screenOrientation="fullUser"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|keyboardHidden"
             android:windowSoftInputMode="adjustResize" />
 
