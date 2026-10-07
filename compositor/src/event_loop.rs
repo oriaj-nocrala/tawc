@@ -8,7 +8,7 @@
 use std::ffi::c_void;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::{mpsc, Arc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{error, info};
 use smithay::reexports::wayland_server::Resource;
@@ -671,8 +671,14 @@ pub fn run(
     // (Source 1) — no separate dispatch_clients here. We do still flush at
     // the end of each tick so frame callbacks reach clients on idle ticks
     // (the fd-source dispatcher only flushes on incoming requests).
-    let frame_timer = Timer::from_duration(Duration::from_millis(16));
-    loop_handle.insert_source(frame_timer, move |_, _, data: &mut TawcState| {
+    //
+    // Ticks are scheduled from the previous tick's deadline, not from when
+    // the callback returns. Re-arming with `ToDuration(16ms)` after the work
+    // made the period 16 ms + render/swap time (~19 ms, ~52 fps measured on
+    // a Mali-G610 with a client presenting FIFO). If a tick runs late we
+    // skip the missed slots instead of firing a burst to catch up.
+    let frame_timer = Timer::from_duration(FRAME_PERIOD);
+    loop_handle.insert_source(frame_timer, move |deadline, _, data: &mut TawcState| {
         crate::xwayland::service_pending(&data.loop_handle(), data);
 
         // New toplevels or dead toplevels need a repaint and focus update.
@@ -773,7 +779,7 @@ pub fn run(
             error!("flush_clients error: {}", e);
         }
 
-        TimeoutAction::ToDuration(Duration::from_millis(16))
+        TimeoutAction::ToInstant(next_frame_deadline(deadline, Instant::now()))
     })?;
 
     // Spawn Xwayland (best-effort: failure logs and continues — the
@@ -827,6 +833,20 @@ pub fn run(
 
     info!("Event loop exited after {} frames", state.frame_count);
     loop_result
+}
+
+/// Interval between frame-timer ticks (60 Hz).
+const FRAME_PERIOD: Duration = Duration::from_micros(16_667);
+
+/// Next tick after the one due at `deadline`, keeping the timer on a fixed
+/// grid. Slots already in the past at `now` are skipped.
+fn next_frame_deadline(deadline: Instant, now: Instant) -> Instant {
+    let mut next = deadline + FRAME_PERIOD;
+    if next <= now {
+        let missed = (now - next).as_nanos() / FRAME_PERIOD.as_nanos() + 1;
+        next += FRAME_PERIOD * missed as u32;
+    }
+    next
 }
 
 fn render_visible_host(data: &mut TawcState) -> bool {
